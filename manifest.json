@@ -1,0 +1,31 @@
+{
+    "manifest_version": 3,
+    "name": "taskimatic",
+    "version": "1.0",
+    "description": "Tabs, Bookmarks & History Manager: Retrieve open tab URLs, display bookmark hierarchy with reorganize functionality, and show a timeline of your browsing history with deduplication.",
+    "permissions": ["tabs", "bookmarks", "history", "contextMenus", "scripting", "storage", "notifications", "clipboardWrite", "webRequest", "responseHeaders", "cookies"],
+    "host_permissions": ["https://*.taskimatic.com/*", "<all_urls>"],
+    "background": {
+      "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+        "matches": ["<all_urls>"],
+        "js": ["content.js"],
+        "run_at": "document_end"
+        }
+    ],
+    "options_ui": {
+      "page": "options.html"
+    },
+    "action": {
+      "default_title": "taskimatic",
+      "default_popup": "view.html",
+      "default_icon": {
+        "16": "icon16.png",
+        "48": "icon48.png",
+        "128": "icon128.png"
+      }
+    }
+  }
+  

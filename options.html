@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Extension Options</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      h1 {
+        margin-bottom: 20px;
+      }
+      .option {
+        margin-bottom: 15px;
+      }
+      label {
+        margin-left: 8px;
+      }
+      button {
+        margin-top: 20px;
+        padding: 8px 12px;
+      }
+      #status {
+        margin-top: 10px;
+        color: green;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Extension Options</h1>
+    <div class="option">
+      <input type="checkbox" id="showWebRequestCounts" />
+      <label for="showWebRequestCounts">Show Web Request Counts</label>
+    </div>
+    <div class="option">
+      <input type="checkbox" id="autoOrganizeBookmarks" />
+      <label for="autoOrganizeBookmarks">Auto Organize Bookmarks</label>
+    </div>
+    <div class="option">
+      <input type="checkbox" id="autoSummarizeHistory" />
+      <label for="autoSummarizeHistory">Auto Summarize History</label>
+    </div>
+    <button id="saveButton">Save Options</button>
+    <div id="status"></div>
+
+    <script>
+      // Default options in case none are set yet.
+      const defaultOptions = {
+        showWebRequestCounts: true,
+        autoOrganizeBookmarks: false,
+        autoSummarizeHistory: true
+      };
+
+      // Save options to chrome.storage.sync.
+      function saveOptions() {
+        const options = {
+          showWebRequestCounts: document.getElementById('showWebRequestCounts').checked,
+          autoOrganizeBookmarks: document.getElementById('autoOrganizeBookmarks').checked,
+          autoSummarizeHistory: document.getElementById('autoSummarizeHistory').checked
+        };
+        chrome.storage.sync.set(options, function() {
+          const status = document.getElementById('status');
+          status.textContent = 'Options saved.';
+          setTimeout(() => {
+            status.textContent = '';
+          }, 1500);
+        });
+      }
+
+      // Restore options from chrome.storage.sync.
+      function restoreOptions() {
+        chrome.storage.sync.get(defaultOptions, function(items) {
+          document.getElementById('showWebRequestCounts').checked = items.showWebRequestCounts;
+          document.getElementById('autoOrganizeBookmarks').checked = items.autoOrganizeBookmarks;
+          document.getElementById('autoSummarizeHistory').checked = items.autoSummarizeHistory;
+        });
+      }
+
+      document.addEventListener('DOMContentLoaded', restoreOptions);
+      document.getElementById('saveButton').addEventListener('click', saveOptions);
+    </script>
+  </body>
+</html>

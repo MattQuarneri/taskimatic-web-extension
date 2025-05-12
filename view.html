@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Tabs, Bookmarks & History Manager</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manage your open tabs, bookmarks, and history with ease.">
+    <meta name="author" content="Matthew Quarneri">
+    <meta name="keywords" content="tabs, bookmarks, history, data manager and getter, Chrome extension">
+    <meta name="theme-color" content="#D00E00">
+    <link rel="icon" href="icon310.png" type="image/png">
+    <link rel="manifest" href="manifest.json">
+    <style>
+      body { font-family: sans-serif; margin: 0px; }
+      h1 { margin: 10px 0 5px; }
+      h2 { margin: 8px 0 4px; }
+      ul { list-style-type: none; padding-left: 15px; }
+      li { margin-bottom: 4px; }
+      .folder { font-weight: bold; }
+      button { margin-bottom: 10px; }
+      #logo{
+        position: absolute;
+        top: 0px;
+        right:0px;
+        width: 100px;
+        height: auto;
+        float: right;
+        z-index: 10;
+      }
+      #activities {
+        position: relative;
+        top: 10px;
+        width: 400px;
+        height: 400px; /* Adjust as needed */
+
+      }
+    </style>
+  </head>
+  <body>
+    <a href="https://www.taskimatic.com" target="_blank">
+      <img id="logo" src="brand.png" alt="taskimatic" title="taskimatic">
+    </a>
+    <tab-widget id="activities" default-tab="tabs">
+      <div slot="tab-content" tab-content="agent" tab-label="Agent">
+        <p>Arriving Soon</p>
+      </div>
+      <div slot="tab-content" tab-content="tabs" tab-label="Tabs">
+        <ul id="tabsList"></ul>
+      </div>
+      <div slot="tab-content" tab-content="links" tab-label="Links">
+        <button id="reorganizeBtn">Reorganize Bookmarks (Sort A-Z)</button>
+        <div id="bookmarksContainer"></div>
+      </div>
+      <div slot="tab-content" tab-content="history" tab-label="History">
+        <button id="loadHistoryBtn">Load History (Timeline)</button>
+        <div id="historyContainer"></div>
+      </div>
+      <div slot="tab-content" tab-content="cookies" tab-label="Cookies">
+        <input type="text" id="domainInput" list="domainsList" placeholder="Enter domain..." autocomplete="off">
+        <datalist id="domainsList"></datalist>
+        <button id="clearButton">Clear Data</button>
+        <div id="status"></div>
+      </div>
+    </tab-widget>
+    <script src="tab-widget.js"></script>
+    <script src="actions.js"></script>
+  </body>
+</html>
