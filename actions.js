@@ -8,9 +8,7 @@ document.addEventListener('DOMContentLoaded', function() {
     chrome.tabs.query({}, function(tabs) {
       const tabsList = document.getElementById('tabsList');
       tabs.forEach(tab => {
-        let li = document.createElement('li');
-        li.textContent = tab.url;
-        tabsList.appendChild(li);
+        tabsList.appendChild(renderTab(tab));
       });
     });
     
@@ -35,6 +33,45 @@ document.addEventListener('DOMContentLoaded', function() {
       loadHistory();
     });
   });
+  
+  // --- Tabs Functions ---
+  
+  // Helper to convert a URL to a readable name
+  function URLtoName(url) {
+    try {
+      // Remove protocol
+      url = url.replace(/^https?:\/\//, '');
+      // Remove www.
+      url = url.replace(/^www\./, '');
+      // Remove .com (and optionally .net, .org, etc. for more generality)
+      url = url.replace(/\.(com|net|org|io|co|gov|edu)(\/|$)/, '/');
+      // Remove URL arguments
+      url = url.split('?')[0];
+      // Replace / and - with spaces
+      url = url.replace(/[\/-]+/g, ' ');
+      // Remove trailing slash
+      url = url.replace(/\/$/, '');
+      // Trim whitespace
+      url = url.trim();
+      return url;
+    } catch (e) {
+      return url;
+    }
+  }
+
+  // Render a tab as an LI with a button linking to the tab's URL and a readable name
+  function renderTab(tab) {
+    let li = document.createElement('li');
+    let button = document.createElement('button');
+    let a = document.createElement('a');
+    a.href = tab.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = URLtoName(tab.url);
+    button.appendChild(a);
+    li.appendChild(button);
+    return li;
+  }
   
   // --- Bookmarks Functions ---
   
