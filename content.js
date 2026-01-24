@@ -5,73 +5,536 @@ let branchRoot = null;
 let lastRightClickedElement = null;
 let selectedElement = null;
 
+// ============================================================================
+// TABLE ANALYSIS SYSTEM
+// Analyzes HTML elements to extract tabular data with structure inference
+// ============================================================================
+
 /**
- * Parses text from a data table into a structured object
- * @param {string} text - The raw table text
- * @return {Object} A structured table object
+ * Main entry point: Analyzes an element and extracts tabular data
+ * @param {HTMLElement} el - The element to analyze
+ * @return {Object} Structured table data with metadata
  */
-function parseTableText(text) {
-  // Create main table object
-  const table = { children: [] };
+function analyzeTableElement(el) {
+  let rawRows = [];
+  let sourceType = 'unknown';
   
-  // Split text by newlines to create rows
-  const lines = text.split('\n');
+  // Strategy 1: Semantic HTML table
+  if (el.tagName === 'TABLE' || el.querySelector('table')) {
+    const table = el.tagName === 'TABLE' ? el : el.querySelector('table');
+    rawRows = extractFromSemanticTable(table);
+    sourceType = 'semantic-table';
+  }
+  // Strategy 2: Elements with table ARIA roles
+  else if (el.getAttribute('role') === 'table' || el.querySelector('[role="table"]')) {
+    const tableEl = el.getAttribute('role') === 'table' ? el : el.querySelector('[role="table"]');
+    rawRows = extractFromAriaTable(tableEl);
+    sourceType = 'aria-table';
+  }
+  // Strategy 3: CSS Grid layout
+  else if (isGridLayout(el)) {
+    rawRows = extractFromGridLayout(el);
+    sourceType = 'css-grid';
+  }
+  // Strategy 4: Repeated child structures (div-based tables)
+  else if (hasRepeatedStructure(el)) {
+    rawRows = extractFromRepeatedStructure(el);
+    sourceType = 'repeated-structure';
+  }
+  // Strategy 5: Fallback to text-based parsing
+  else {
+    rawRows = extractFromText(el.innerText);
+    sourceType = 'text-fallback';
+  }
   
-  // Build the initial structure
-  for (const line of lines) {
-    if (line.trim() === '') continue; // Skip empty lines
+  // Infer structure (headers, footers, title rows)
+  const structure = inferTableStructure(rawRows);
+  
+  return {
+    sourceType,
+    ...structure
+  };
+}
+
+/**
+ * Extract rows from a semantic HTML table
+ */
+function extractFromSemanticTable(table) {
+  const rows = [];
+  
+  // Process thead
+  const thead = table.querySelector('thead');
+  if (thead) {
+    for (const tr of thead.querySelectorAll('tr')) {
+      rows.push({
+        cells: extractCellsFromTr(tr),
+        source: 'thead',
+        isHeader: true
+      });
+    }
+  }
+  
+  // Process tbody (or direct tr children if no tbody)
+  const tbody = table.querySelector('tbody');
+  const bodyRows = tbody ? tbody.querySelectorAll('tr') : table.querySelectorAll(':scope > tr');
+  for (const tr of bodyRows) {
+    // Skip if already processed in thead
+    if (thead && thead.contains(tr)) continue;
     
-    const row = { type: 'row', children: [] };
+    const cells = extractCellsFromTr(tr);
+    const hasThCells = tr.querySelectorAll('th').length > 0;
     
-    // Split row by tabs to create fields
-    const fields = line.split('\t');
-    for (const field of fields) {
-      row.children.push({
-        type: 'field',
-        value: field
+    rows.push({
+      cells,
+      source: 'tbody',
+      isHeader: hasThCells && tr.querySelectorAll('td').length === 0
+    });
+  }
+  
+  // Process tfoot
+  const tfoot = table.querySelector('tfoot');
+  if (tfoot) {
+    for (const tr of tfoot.querySelectorAll('tr')) {
+      rows.push({
+        cells: extractCellsFromTr(tr),
+        source: 'tfoot',
+        isFooter: true
+      });
+    }
+  }
+  
+  return rows;
+}
+
+/**
+ * Extract cell values from a table row
+ */
+function extractCellsFromTr(tr) {
+  const cells = [];
+  for (const cell of tr.querySelectorAll('th, td')) {
+    const colspan = parseInt(cell.getAttribute('colspan')) || 1;
+    const value = cell.innerText.trim();
+    
+    // Handle colspan by repeating the value or adding empty cells
+    cells.push({ value, isHeader: cell.tagName === 'TH' });
+    for (let i = 1; i < colspan; i++) {
+      cells.push({ value: '', isHeader: cell.tagName === 'TH', spanned: true });
+    }
+  }
+  return cells;
+}
+
+/**
+ * Extract rows from ARIA table roles
+ */
+function extractFromAriaTable(tableEl) {
+  const rows = [];
+  const rowEls = tableEl.querySelectorAll('[role="row"]');
+  
+  for (const rowEl of rowEls) {
+    const cells = [];
+    const cellEls = rowEl.querySelectorAll('[role="cell"], [role="columnheader"], [role="rowheader"], [role="gridcell"]');
+    
+    for (const cellEl of cellEls) {
+      const role = cellEl.getAttribute('role');
+      cells.push({
+        value: cellEl.innerText.trim(),
+        isHeader: role === 'columnheader' || role === 'rowheader'
       });
     }
     
-    // Only add non-empty rows
-    if (row.children.length > 0) {
-      table.children.push(row);
-    }
+    const isHeaderRow = cells.length > 0 && cells.every(c => c.isHeader);
+    rows.push({ cells, source: 'aria', isHeader: isHeaderRow });
   }
   
-  // Process sequences of rows with the same number of fields
-  let currentFieldCount = -1;
-  let sequenceStart = 0;
+  return rows;
+}
+
+/**
+ * Check if element uses CSS Grid layout
+ */
+function isGridLayout(el) {
+  const style = window.getComputedStyle(el);
+  return style.display === 'grid' || style.display === 'inline-grid';
+}
+
+/**
+ * Extract rows from CSS Grid layout
+ */
+function extractFromGridLayout(el) {
+  const style = window.getComputedStyle(el);
+  const columns = style.gridTemplateColumns.split(' ').filter(c => c && c !== 'none').length;
   
-  for (let i = 0; i <= table.children.length; i++) {
-    const isEndOfTable = i === table.children.length;
-    const fieldCount = !isEndOfTable ? table.children[i].children.length : null;
-    const isNewSequence = fieldCount !== currentFieldCount;
+  if (columns === 0) return extractFromText(el.innerText);
+  
+  const children = Array.from(el.children);
+  const rows = [];
+  
+  for (let i = 0; i < children.length; i += columns) {
+    const rowCells = children.slice(i, i + columns).map(child => ({
+      value: child.innerText.trim(),
+      isHeader: false
+    }));
+    rows.push({ cells: rowCells, source: 'grid' });
+  }
+  
+  return rows;
+}
+
+/**
+ * Check if element has repeated child structures (common in div-based tables)
+ */
+function hasRepeatedStructure(el) {
+  const children = Array.from(el.children);
+  if (children.length < 2) return false;
+  
+  // Check if children have similar structure (same tag, similar class patterns)
+  const signatures = children.slice(0, Math.min(5, children.length)).map(getElementSignature);
+  const uniqueSignatures = new Set(signatures);
+  
+  // If most children have the same signature, it's likely a repeated structure
+  return uniqueSignatures.size <= 2 && children.length >= 3;
+}
+
+/**
+ * Get a signature string for an element's structure
+ */
+function getElementSignature(el) {
+  const childTags = Array.from(el.children).map(c => c.tagName).join(',');
+  const childCount = el.children.length;
+  return `${el.tagName}:${childCount}:${childTags.substring(0, 50)}`;
+}
+
+/**
+ * Extract rows from repeated div/element structures
+ */
+function extractFromRepeatedStructure(el) {
+  const rows = [];
+  const children = Array.from(el.children);
+  
+  for (const child of children) {
+    const cells = [];
     
-    // If we're at the end of a sequence or the end of the table
-    if (isEndOfTable || isNewSequence) {
-      // Check if the previous sequence had multiple rows
-      const sequenceLength = i - sequenceStart;
-      if (sequenceLength > 1) {
-        // Get the first row of the sequence and its fields
-        const firstRow = table.children[sequenceStart];
-        const headerFields = firstRow.children;
-        
-        // Replace the fields with a single header object
-        firstRow.children = [{
-          type: 'header',
-          children: headerFields
-        }];
+    // If the child has children, treat each as a cell
+    if (child.children.length > 0) {
+      for (const cellEl of child.children) {
+        cells.push({
+          value: cellEl.innerText.trim(),
+          isHeader: false
+        });
       }
-      
-      // Start a new sequence if not at the end
-      if (!isEndOfTable) {
-        currentFieldCount = fieldCount;
-        sequenceStart = i;
-      }
+    } else {
+      // Single cell row
+      cells.push({
+        value: child.innerText.trim(),
+        isHeader: false
+      });
+    }
+    
+    if (cells.some(c => c.value)) {
+      rows.push({ cells, source: 'repeated' });
     }
   }
   
-  return table;
+  return rows;
+}
+
+/**
+ * Fallback: Extract rows from plain text
+ */
+function extractFromText(text) {
+  const rows = [];
+  const lines = text.split('\n');
+  
+  for (const line of lines) {
+    if (line.trim() === '') continue;
+    
+    // Try tab-separated first, then multiple spaces, then single values
+    let values;
+    if (line.includes('\t')) {
+      values = line.split('\t');
+    } else if (line.includes('  ')) {
+      values = line.split(/\s{2,}/);
+    } else {
+      values = [line];
+    }
+    
+    const cells = values.map(v => ({ value: v.trim(), isHeader: false }));
+    if (cells.some(c => c.value)) {
+      rows.push({ cells, source: 'text' });
+    }
+  }
+  
+  return rows;
+}
+
+/**
+ * Infer table structure: identify headers, footers, title rows, and data rows
+ */
+function inferTableStructure(rawRows) {
+  if (rawRows.length === 0) {
+    return { titleRows: [], headerRow: null, dataRows: [], footerRows: [], columnCount: 0 };
+  }
+  
+  // Count cells per row
+  const cellCounts = rawRows.map(r => r.cells.length);
+  
+  // Find the "mode" (most common cell count) - this represents data rows
+  const countFrequency = {};
+  cellCounts.forEach(c => { countFrequency[c] = (countFrequency[c] || 0) + 1; });
+  const modeCount = Object.entries(countFrequency)
+    .sort((a, b) => b[1] - a[1])[0][0];
+  const expectedColumnCount = parseInt(modeCount);
+  
+  // Classify rows
+  const result = {
+    titleRows: [],
+    headerRow: null,
+    dataRows: [],
+    footerRows: [],
+    columnCount: expectedColumnCount
+  };
+  
+  // Find the first row that matches the expected column count
+  let dataStartIndex = rawRows.findIndex(r => r.cells.length === expectedColumnCount);
+  if (dataStartIndex === -1) dataStartIndex = 0;
+  
+  // Rows before the data section with different column counts are title rows
+  for (let i = 0; i < dataStartIndex; i++) {
+    result.titleRows.push({
+      type: 'title',
+      values: rawRows[i].cells.map(c => c.value)
+    });
+  }
+  
+  // Find where data rows end (look for footer pattern at the end)
+  let dataEndIndex = rawRows.length;
+  for (let i = rawRows.length - 1; i > dataStartIndex; i--) {
+    const row = rawRows[i];
+    // Footer indicators: different column count, marked as footer, or contains summary words
+    if (row.isFooter || 
+        row.cells.length !== expectedColumnCount ||
+        containsFooterIndicators(row)) {
+      dataEndIndex = i;
+    } else {
+      break;
+    }
+  }
+  
+  // Process the main data section
+  let headerFound = false;
+  for (let i = dataStartIndex; i < dataEndIndex; i++) {
+    const row = rawRows[i];
+    
+    // First row in data section: check if it's a header
+    if (!headerFound && shouldBeHeader(row, rawRows, i, expectedColumnCount)) {
+      result.headerRow = {
+        type: 'header',
+        values: row.cells.map(c => c.value)
+      };
+      headerFound = true;
+    } else {
+      result.dataRows.push({
+        type: 'data',
+        values: row.cells.map(c => c.value)
+      });
+    }
+  }
+  
+  // Footer rows
+  for (let i = dataEndIndex; i < rawRows.length; i++) {
+    result.footerRows.push({
+      type: 'footer',
+      values: rawRows[i].cells.map(c => c.value)
+    });
+  }
+  
+  return result;
+}
+
+/**
+ * Determine if a row should be treated as a header
+ */
+function shouldBeHeader(row, allRows, index, expectedColumnCount) {
+  // Already marked as header from HTML
+  if (row.isHeader) return true;
+  if (row.source === 'thead') return true;
+  
+  // All cells are marked as headers (th elements)
+  if (row.cells.every(c => c.isHeader)) return true;
+  
+  // First row with matching column count, followed by more rows with same count
+  if (index === 0 || allRows[index - 1].cells.length !== expectedColumnCount) {
+    const followingRows = allRows.slice(index + 1, index + 4);
+    const sameCountFollowing = followingRows.filter(r => r.cells.length === expectedColumnCount).length;
+    if (sameCountFollowing >= 2) {
+      // Check if values look like headers (non-numeric, shorter text)
+      const values = row.cells.map(c => c.value);
+      const looksLikeHeaders = values.every(v => {
+        const trimmed = v.trim();
+        return trimmed.length < 50 && !/^[\d,.$€£¥%+-]+$/.test(trimmed);
+      });
+      return looksLikeHeaders;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if a row contains footer indicators
+ */
+function containsFooterIndicators(row) {
+  const text = row.cells.map(c => c.value).join(' ').toLowerCase();
+  const footerWords = ['total', 'sum', 'average', 'avg', 'count', 'subtotal', 'grand total'];
+  return footerWords.some(word => text.includes(word));
+}
+
+// ============================================================================
+// OUTPUT FORMATTERS
+// ============================================================================
+
+/**
+ * Format table structure as TSV (Tab-Separated Values)
+ * Best for pasting into spreadsheets
+ */
+function formatAsTSV(structure) {
+  const lines = [];
+  
+  // Title rows
+  for (const row of structure.titleRows) {
+    lines.push(row.values.join('\t'));
+  }
+  
+  // Add blank line after titles if there are any
+  if (structure.titleRows.length > 0 && (structure.headerRow || structure.dataRows.length > 0)) {
+    lines.push('');
+  }
+  
+  // Header row
+  if (structure.headerRow) {
+    lines.push(structure.headerRow.values.join('\t'));
+  }
+  
+  // Data rows
+  for (const row of structure.dataRows) {
+    lines.push(row.values.join('\t'));
+  }
+  
+  // Footer rows
+  if (structure.footerRows.length > 0) {
+    lines.push(''); // Blank line before footer
+    for (const row of structure.footerRows) {
+      lines.push(row.values.join('\t'));
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format table structure as CSV
+ */
+function formatAsCSV(structure) {
+  const escapeCSV = (value) => {
+    if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+      return '"' + value.replace(/"/g, '""') + '"';
+    }
+    return value;
+  };
+  
+  const lines = [];
+  
+  // Title rows
+  for (const row of structure.titleRows) {
+    lines.push(row.values.map(escapeCSV).join(','));
+  }
+  
+  if (structure.titleRows.length > 0 && (structure.headerRow || structure.dataRows.length > 0)) {
+    lines.push('');
+  }
+  
+  // Header row
+  if (structure.headerRow) {
+    lines.push(structure.headerRow.values.map(escapeCSV).join(','));
+  }
+  
+  // Data rows
+  for (const row of structure.dataRows) {
+    lines.push(row.values.map(escapeCSV).join(','));
+  }
+  
+  // Footer rows
+  if (structure.footerRows.length > 0) {
+    lines.push('');
+    for (const row of structure.footerRows) {
+      lines.push(row.values.map(escapeCSV).join(','));
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format table structure as Markdown table
+ */
+function formatAsMarkdown(structure) {
+  const lines = [];
+  const columnCount = structure.columnCount || 1;
+  
+  // Title rows (as paragraphs above the table)
+  for (const row of structure.titleRows) {
+    lines.push('**' + row.values.join(' ') + '**');
+    lines.push('');
+  }
+  
+  // Header row
+  if (structure.headerRow) {
+    lines.push('| ' + structure.headerRow.values.join(' | ') + ' |');
+    lines.push('| ' + structure.headerRow.values.map(() => '---').join(' | ') + ' |');
+  } else if (structure.dataRows.length > 0) {
+    // Create generic headers if none exist
+    const headers = Array.from({ length: columnCount }, (_, i) => `Column ${i + 1}`);
+    lines.push('| ' + headers.join(' | ') + ' |');
+    lines.push('| ' + headers.map(() => '---').join(' | ') + ' |');
+  }
+  
+  // Data rows
+  for (const row of structure.dataRows) {
+    // Pad row to match column count
+    const paddedValues = [...row.values];
+    while (paddedValues.length < columnCount) paddedValues.push('');
+    lines.push('| ' + paddedValues.join(' | ') + ' |');
+  }
+  
+  // Footer rows
+  if (structure.footerRows.length > 0) {
+    lines.push(''); // Blank line
+    for (const row of structure.footerRows) {
+      lines.push('**' + row.values.join(' | ') + '**');
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format table structure as structured JSON
+ */
+function formatAsJSON(structure, elementMeta = {}) {
+  return JSON.stringify({
+    ...elementMeta,
+    table: structure
+  }, null, 2);
+}
+
+/**
+ * Legacy function for backward compatibility
+ * @deprecated Use analyzeTableElement instead
+ */
+function parseTableText(text) {
+  const rows = extractFromText(text);
+  return inferTableStructure(rows);
 }
 
 
@@ -105,6 +568,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       selectedElement = baseElement;
       safeHighlight(selectedElement);
       attachSelectionListeners(selectedElement);
+  }
+  // Handle format change from context menu or popup
+  if (message.action === "setOutputFormat" && message.format) {
+    setOutputFormat(message.format);
+    showPopupMessage(`Output format: ${message.format.toUpperCase()}`);
   }
   if (message.type === "updateDomainCounts") {
     const contentDiv = document.getElementById("domainOverlayContent");
@@ -236,27 +704,69 @@ function onMouseLeaveHandler(e) {
   selectedElement = null;
 }
 
+// Current output format preference (can be changed via context menu or settings)
+let outputFormat = 'tsv'; // Options: 'tsv', 'csv', 'markdown', 'json'
+
+/**
+ * Set the output format for clipboard data
+ * @param {string} format - One of: 'tsv', 'csv', 'markdown', 'json'
+ */
+function setOutputFormat(format) {
+  if (['tsv', 'csv', 'markdown', 'json'].includes(format)) {
+    outputFormat = format;
+  }
+}
+
+/**
+ * Format the table structure based on current output format preference
+ */
+function formatTableOutput(structure, elementMeta) {
+  switch (outputFormat) {
+    case 'csv':
+      return formatAsCSV(structure);
+    case 'markdown':
+      return formatAsMarkdown(structure);
+    case 'json':
+      return formatAsJSON(structure, elementMeta);
+    case 'tsv':
+    default:
+      return formatAsTSV(structure);
+  }
+}
+
 // When the selected element is clicked, extract data, copy it, animate, and show a popup.
 function onClickHandler(e) {
   e.preventDefault();
   e.stopPropagation();
   if (selectedElement) {
-    const data = {
+    // Analyze the element using the new HTML-aware system
+    const tableStructure = analyzeTableElement(selectedElement);
+    
+    // Element metadata for JSON output
+    const elementMeta = {
       tag: selectedElement.tagName,
       id: selectedElement.id,
       class: selectedElement.className,
-      text: selectedElement.innerText,
-      object: parseTableText(selectedElement.innerText)
-      //html: selectedElement.outerHTML -- commented out to avoid large data
+      sourceType: tableStructure.sourceType
     };
-    copyToClipboard(JSON.stringify(data, null, 2));
+    
+    // Format output based on preference (default: TSV for spreadsheet compatibility)
+    const output = formatTableOutput(tableStructure, elementMeta);
+    
+    copyToClipboard(output);
     animateRemoval(selectedElement);
+    
     // Remove listeners and clear selection.
     selectedElement.removeEventListener("wheel", onWheelHandler);
     selectedElement.removeEventListener("mouseleave", onMouseLeaveHandler);
     selectedElement.removeEventListener("click", onClickHandler);
     selectedElement = null;
-    showPopupMessage("Clipped");
+    
+    // Show format in popup message
+    const formatLabel = outputFormat.toUpperCase();
+    const rowCount = tableStructure.dataRows.length;
+    const colCount = tableStructure.columnCount;
+    showPopupMessage(`Clipped as ${formatLabel} (${rowCount} rows × ${colCount} cols)`);
   }
 }
 

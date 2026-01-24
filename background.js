@@ -69,14 +69,60 @@ function formatBytes(bytes) {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
+  // Main "Get Data" action
   chrome.contextMenus.create({
     id: "getData",
     title: "Get Data",
     contexts: ["all"]
   });
+  
+  // Parent menu for format selection
+  chrome.contextMenus.create({
+    id: "getDataFormat",
+    title: "Get Data Format",
+    contexts: ["all"]
+  });
+  
+  // Format options
+  chrome.contextMenus.create({
+    id: "format-tsv",
+    parentId: "getDataFormat",
+    title: "TSV (Spreadsheet)",
+    contexts: ["all"]
+  });
+  chrome.contextMenus.create({
+    id: "format-csv",
+    parentId: "getDataFormat",
+    title: "CSV",
+    contexts: ["all"]
+  });
+  chrome.contextMenus.create({
+    id: "format-markdown",
+    parentId: "getDataFormat",
+    title: "Markdown Table",
+    contexts: ["all"]
+  });
+  chrome.contextMenus.create({
+    id: "format-json",
+    parentId: "getDataFormat",
+    title: "JSON",
+    contexts: ["all"]
+  });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  // Handle format selection
+  if (info.menuItemId.startsWith("format-")) {
+    const format = info.menuItemId.replace("format-", "");
+    chrome.tabs.get(tab.id, (tabInfo) => {
+      if (!tabInfo.url.startsWith('chrome://') && !tabInfo.url.startsWith('chrome-extension://')) {
+        chrome.tabs.sendMessage(tab.id, { action: "setOutputFormat", format })
+          .catch(error => console.error("Error setting format:", error));
+      }
+    });
+    return;
+  }
+  
   if (info.menuItemId === "getData") {
     // First check if we can send messages to this tab
     chrome.tabs.get(tab.id, (tabInfo) => {

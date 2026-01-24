@@ -5,11 +5,14 @@ if (!customElements.get('tab-widget')) {
 // When the DOM is loaded, load tabs and bookmarks.
 document.addEventListener('DOMContentLoaded', function() {
     // Retrieve and display open tab URLs.
+    let tabCount = 0;
     chrome.tabs.query({}, function(tabs) {
       const tabsList = document.getElementById('tabsList');
       tabs.forEach(tab => {
+        tabCount++;
         tabsList.appendChild(renderTab(tab));
       });
+      document.getElementById("save2JSON").textContent = `Save ${tabCount} Tabs to JSON`;
     });
     
     // Retrieve and display bookmark tree.
@@ -31,6 +34,33 @@ document.addEventListener('DOMContentLoaded', function() {
     // Load history timeline on button click.
     document.getElementById('loadHistoryBtn').addEventListener('click', function() {
       loadHistory();
+    });
+    // Save open tab URLs and titles to JSON file on button click.
+    document.getElementById('save2JSON').addEventListener('click', function() {
+      chrome.tabs.query({}, function(tabs) {
+        const tabData = tabs.map(tab => ({ url: tab.url, title: tab.title }));
+        const json = JSON.stringify(tabData, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+
+        const d = new Date();
+        const ts = d.getFullYear() +
+          String(d.getMonth()+1).padStart(2,'0') +
+          String(d.getDate()).padStart(2,'0') +
+          String(d.getHours()).padStart(2,'0') +
+          String(d.getMinutes()).padStart(2,'0') +
+          String(d.getSeconds()).padStart(2,'0');
+
+        a.download = `open-tabs-${ts}.json`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 100);
+      });
     });
   });
   
