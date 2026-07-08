@@ -2,8 +2,12 @@ if (!customElements.get('tab-widget')) {
   console.error('tab-widget component not loaded or registered');
 }
 
+const QUICK_READ_DEFAULT_ACTION_WORDS = ["secure", "power", "plan", "update", "efficient", "develop", "custom"];
+
 // When the DOM is loaded, load tabs and bookmarks.
 document.addEventListener('DOMContentLoaded', function() {
+    initializeQuickReadControls();
+
     // Retrieve and display open tab URLs.
     let tabCount = 0;
     chrome.tabs.query({}, function(tabs) {
@@ -63,6 +67,105 @@ document.addEventListener('DOMContentLoaded', function() {
       });
     });
   });
+
+  // --- Content Functions ---
+
+  function initializeQuickReadControls() {
+    const quickReadButton = document.getElementById('quickReadBtn');
+    const resetWordsButton = document.getElementById('resetQuickReadWordsBtn');
+    const actionWordsInput = document.getElementById('quickReadActionWords');
+
+    if (!quickReadButton || !resetWordsButton || !actionWordsInput) {
+      return;
+    }
+
+    chrome.storage.sync.get({
+      quickReadActionWords: QUICK_READ_DEFAULT_ACTION_WORDS
+    }, function(items) {
+      actionWordsInput.value = normalizeQuickReadWords(items.quickReadActionWords)
+        .join(', ');
+    });
+
+    quickReadButton.addEventListener('click', function() {
+      const actionWords = normalizeQuickReadWords(actionWordsInput.value);
+      chrome.storage.sync.set({ quickReadActionWords: actionWords }, function() {
+        applyQuickRead(actionWords);
+      });
+    });
+
+    resetWordsButton.addEventListener('click', function() {
+      actionWordsInput.value = QUICK_READ_DEFAULT_ACTION_WORDS.join(', ');
+      chrome.storage.sync.set({ quickReadActionWords: QUICK_READ_DEFAULT_ACTION_WORDS }, function() {
+        updateQuickReadStatus('Action words reset.');
+      });
+    });
+  }
+
+  function normalizeQuickReadWords(value) {
+    const words = Array.isArray(value)
+      ? value
+      : String(value || '').split(/[\s,]+/);
+
+    const seen = new Set();
+    return words
+      .map(word => String(word).trim().toLowerCase())
+      .filter(word => /^[a-z]+(?:'[a-z]+)?$/.test(word))
+      .filter(word => {
+        if (seen.has(word)) return false;
+        seen.add(word);
+        return true;
+      });
+  }
+
+  function applyQuickRead(actionWords) {
+    updateQuickReadStatus('Applying Quick Read...');
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+      const activeTab = tabs[0];
+      if (!activeTab || typeof activeTab.id !== 'number' || !canMessageTab(activeTab.url)) {
+        updateQuickReadStatus('Quick Read cannot run on this tab.');
+        return;
+      }
+
+      chrome.tabs.sendMessage(activeTab.id, {
+        action: 'applyQuickRead',
+        actionWords
+      }, function(response) {
+        if (chrome.runtime.lastError) {
+          updateQuickReadStatus('Refresh the page, then try Quick Read again.');
+          return;
+        }
+
+        if (!response || !response.ok) {
+          updateQuickReadStatus(response && response.error ? response.error : 'No readable content found.');
+          return;
+        }
+
+        updateQuickReadStatus(`Formatted ${response.words} words in ${response.containers} content area${response.containers === 1 ? '' : 's'}.`);
+      });
+    });
+  }
+
+  function canMessageTab(url) {
+    return Boolean(url) &&
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('about:');
+  }
+
+  function updateQuickReadStatus(message) {
+    const status = document.getElementById('quickReadStatus');
+    if (!status) return;
+    status.textContent = message;
+    if (message) {
+      setTimeout(() => {
+        if (status.textContent === message) {
+          status.textContent = '';
+        }
+      }, 3500);
+    }
+  }
   
   // --- Tabs Functions ---
   

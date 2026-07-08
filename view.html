@@ -18,6 +18,31 @@
       li { margin-bottom: 4px; }
       .folder { font-weight: bold; }
       button { margin-bottom: 10px; }
+      label { display: block; margin: 8px 0 4px; font-weight: bold; }
+      textarea {
+        width: calc(100% - 10px);
+        min-height: 58px;
+        resize: vertical;
+        box-sizing: border-box;
+      }
+      .content-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .content-actions button {
+        margin-bottom: 0;
+      }
+      .hint {
+        color: #555;
+        font-size: 12px;
+        margin: 6px 0;
+      }
+      #quickReadStatus {
+        color: #0a5d25;
+        min-height: 18px;
+        margin-top: 8px;
+      }
       #logo{
         position: absolute;
         top: 0px;
@@ -30,7 +55,7 @@
       #activities {
         position: relative;
         top: 10px;
-        width: 400px;
+        width: 520px;
         height: 400px; /* Adjust as needed */
 
       }
@@ -41,6 +66,18 @@
       <img id="logo" src="brand.png" alt="taskimatic" title="taskimatic">
     </a>
     <tab-widget id="activities" default-tab="tabs">
+      <div slot="tab-content" tab-content="content" tab-label="Content">
+        <h2>Quick Read</h2>
+        <p class="hint">Formats the main readable text on the active page.</p>
+        <label for="quickReadActionWords">Action words</label>
+        <textarea id="quickReadActionWords" spellcheck="false"></textarea>
+        <p class="hint">Separate words with commas, spaces, or line breaks.</p>
+        <div class="content-actions">
+          <button id="quickReadBtn">Quick Read</button>
+          <button id="resetQuickReadWordsBtn">Reset Words</button>
+        </div>
+        <div id="quickReadStatus" aria-live="polite"></div>
+      </div>
       <div slot="tab-content" tab-content="agent" tab-label="Agent">
         <p>Arriving Soon</p>
       </div>
@@ -61,6 +98,10 @@
         <datalist id="domainsList"></datalist>
         <button id="clearButton">Clear Data</button>
         <div id="status"></div>
+      </div>
+      <div slot="tab-content" tab-content="config" tab-label="⚙️">
+        <button id="loadConfigBtn">Load Config</button>
+        <div id="configContainer"></div>
       </div>
     </tab-widget>
     <script src="tab-widget.js"></script>

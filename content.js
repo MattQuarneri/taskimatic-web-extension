@@ -5,6 +5,14 @@ let branchRoot = null;
 let lastRightClickedElement = null;
 let selectedElement = null;
 
+const QUICK_READ_COMMON_WORDS = ["is", "a", "the", "and"];
+const QUICK_READ_INTERROGATIVE_WORDS = ["who", "what", "when", "where", "how", "why", "which", "whom", "whose"];
+const QUICK_READ_DEFAULT_ACTION_WORDS = ["secure", "power", "plan", "update", "efficient", "develop", "custom"];
+const QUICK_READ_EXCLUDED_TAGS = new Set([
+  "A", "BUTTON", "CANVAS", "CODE", "FORM", "IFRAME", "IMG", "INPUT", "NOSCRIPT",
+  "OPTION", "PRE", "SCRIPT", "SELECT", "STYLE", "SVG", "TEXTAREA", "VIDEO"
+]);
+
 // ============================================================================
 // TABLE ANALYSIS SYSTEM
 // Analyzes HTML elements to extract tabular data with structure inference
@@ -587,6 +595,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "scanForHighTextElements") {
     scanForHighTextElements();
   }
+  if (message.action === "applyQuickRead") {
+    try {
+      const result = applyQuickReadFormatting(message);
+      sendResponse({ ok: true, ...result });
+    } catch (error) {
+      console.error("Quick Read failed:", error);
+      sendResponse({ ok: false, error: "Quick Read failed on this page." });
+    }
+  }
 });
 
 // Traverses upward from the given element until the parent's child count drops.
@@ -810,6 +827,320 @@ function showPopupMessage(message) {
       document.body.removeChild(popup);
     }, 1000);
   }, 2000);
+}
+
+// ============================================================================
+// QUICK READ
+// Finds likely prose-heavy content containers and adjusts word styling.
+// ============================================================================
+
+function applyQuickReadFormatting(message = {}) {
+  ensureQuickReadStyles();
+  clearQuickReadFormatting();
+
+  const commonWords = new Set(QUICK_READ_COMMON_WORDS);
+  const interrogativeWords = new Set(QUICK_READ_INTERROGATIVE_WORDS);
+  const actionWords = new Set(normalizeQuickReadWordList(
+    message.actionWords,
+    QUICK_READ_DEFAULT_ACTION_WORDS
+  ));
+  const containers = findQuickReadContentContainers();
+
+  if (containers.length === 0) {
+    showPopupMessage("No readable content found");
+    return { ok: false, error: "No readable content found." };
+  }
+
+  let wordCount = 0;
+  containers.forEach(container => {
+    container.setAttribute("data-taskimatic-quick-read-container", "true");
+    wordCount += formatQuickReadTextNodes(container, {
+      commonWords,
+      interrogativeWords,
+      actionWords
+    });
+  });
+
+  showPopupMessage(`Quick Read formatted ${wordCount} words`);
+  return { containers: containers.length, words: wordCount };
+}
+
+function normalizeQuickReadWordList(value, fallback = []) {
+  const rawWords = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[\s,]+/);
+  const seen = new Set();
+  const words = rawWords
+    .map(word => String(word).trim().toLowerCase())
+    .filter(word => /^[a-z]+(?:'[a-z]+)?$/.test(word))
+    .filter(word => {
+      if (seen.has(word)) return false;
+      seen.add(word);
+      return true;
+    });
+
+  return words.length ? words : fallback;
+}
+
+function ensureQuickReadStyles() {
+  if (document.getElementById("taskimatic-quick-read-styles")) return;
+
+  const style = document.createElement("style");
+  style.id = "taskimatic-quick-read-styles";
+  style.textContent = `
+    .taskimatic-quick-read-word {
+      font-size: 1.16em;
+      line-height: 1.35;
+    }
+    .taskimatic-quick-read-common {
+      font-size: 0.82em;
+      opacity: 0.84;
+    }
+    .taskimatic-quick-read-interrogative {
+      background: #ffe08a;
+      color: #3d2b00;
+      border-radius: 999px;
+      padding: 0.03em 0.34em;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
+    .taskimatic-quick-read-action {
+      font-weight: 700;
+    }
+  `;
+  document.documentElement.appendChild(style);
+}
+
+function clearQuickReadFormatting() {
+  const wrappers = Array.from(document.querySelectorAll('[data-taskimatic-quick-read="word"]'));
+  const parents = new Set();
+
+  wrappers.forEach(wrapper => {
+    const parent = wrapper.parentNode;
+    if (!parent) return;
+    parents.add(parent);
+    parent.replaceChild(document.createTextNode(wrapper.textContent), wrapper);
+  });
+
+  parents.forEach(parent => parent.normalize());
+
+  document
+    .querySelectorAll('[data-taskimatic-quick-read-container="true"]')
+    .forEach(container => {
+      container.removeAttribute("data-taskimatic-quick-read-container");
+    });
+}
+
+function findQuickReadContentContainers() {
+  const elements = Array.from(document.body.querySelectorAll("main, article, section, div"));
+  const candidates = elements
+    .filter(isQuickReadCandidateElement)
+    .map(element => buildQuickReadCandidate(element))
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 80);
+
+  const filteredCandidates = candidates.filter(candidate => {
+    return !candidates.some(other => {
+      if (candidate === other || !candidate.element.contains(other.element)) return false;
+      return other.wordCount >= candidate.wordCount * 0.65 &&
+        other.score >= candidate.score * 0.7 &&
+        other.linkDensity <= candidate.linkDensity + 0.1;
+    });
+  });
+
+  const selected = [];
+  filteredCandidates.forEach(candidate => {
+    const overlapsSelected = selected.some(existing => {
+      return existing.element.contains(candidate.element) ||
+        candidate.element.contains(existing.element);
+    });
+
+    if (!overlapsSelected && selected.length < 6) {
+      selected.push(candidate);
+    }
+  });
+
+  return selected.map(candidate => candidate.element);
+}
+
+function isQuickReadCandidateElement(element) {
+  if (!element || element === document.body || element === document.documentElement) {
+    return false;
+  }
+  if (isQuickReadExcludedElement(element)) {
+    return false;
+  }
+  if (!isQuickReadVisible(element)) {
+    return false;
+  }
+  return true;
+}
+
+function buildQuickReadCandidate(element) {
+  const text = getQuickReadCleanText(element);
+  const wordCount = getQuickReadWordCount(text);
+
+  if (wordCount < 45 || text.length < 180) {
+    return null;
+  }
+
+  const linkLength = Array.from(element.querySelectorAll("a"))
+    .reduce((total, link) => total + getQuickReadCleanText(link).length, 0);
+  const linkDensity = text.length ? linkLength / text.length : 1;
+
+  if (linkDensity > 0.35) {
+    return null;
+  }
+
+  const sentenceCount = (text.match(/[.!?](\s|$)/g) || []).length;
+  if (sentenceCount < 1 && wordCount < 120) {
+    return null;
+  }
+
+  const identity = `${element.id || ""} ${element.className || ""}`.toLowerCase();
+  const hasLowValueName = /\b(ad|ads|advert|banner|breadcrumb|comment|cookie|footer|header|menu|modal|nav|promo|related|share|sidebar|social|sponsor|subscribe)\b/.test(identity);
+  const tagBonus = element.tagName === "ARTICLE" ? 90 :
+    element.tagName === "MAIN" ? 70 :
+    element.tagName === "SECTION" ? 25 : 0;
+  const penalty = hasLowValueName ? 120 : 0;
+  const score = (wordCount * (1 - linkDensity)) + (sentenceCount * 20) + tagBonus - penalty;
+
+  if (score < 35) {
+    return null;
+  }
+
+  return {
+    element,
+    linkDensity,
+    score,
+    wordCount
+  };
+}
+
+function getQuickReadCleanText(element) {
+  return (element.innerText || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getQuickReadWordCount(text) {
+  const words = text.match(/[A-Za-z]+(?:'[A-Za-z]+)?/g);
+  return words ? words.length : 0;
+}
+
+function isQuickReadVisible(element) {
+  const style = window.getComputedStyle(element);
+  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    return false;
+  }
+
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 && element.getClientRects().length > 0;
+}
+
+function isQuickReadExcludedElement(element) {
+  if (QUICK_READ_EXCLUDED_TAGS.has(element.tagName)) return true;
+
+  return Boolean(element.closest([
+    "aside",
+    "footer",
+    "header",
+    "nav",
+    "[aria-hidden='true']",
+    "[role='banner']",
+    "[role='contentinfo']",
+    "[role='navigation']",
+    "#custom-overlay",
+    "#domainOverlay",
+    "#highlight-overlay",
+    "#modal-overlay"
+  ].join(",")));
+}
+
+function formatQuickReadTextNodes(container, wordSets) {
+  const textNodes = [];
+  const walker = document.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
+        const parent = node.parentElement;
+        if (!parent || isQuickReadExcludedTextParent(parent)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
+        return /[A-Za-z]/.test(node.nodeValue)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      }
+    }
+  );
+
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+
+  let wordCount = 0;
+  textNodes.forEach(textNode => {
+    const fragment = document.createDocumentFragment();
+    const tokens = textNode.nodeValue.match(/[A-Za-z]+(?:'[A-Za-z]+)?|\s+|./g) || [];
+
+    tokens.forEach(token => {
+      if (/^[A-Za-z]+(?:'[A-Za-z]+)?$/.test(token)) {
+        fragment.appendChild(createQuickReadWord(token, wordSets));
+        wordCount++;
+      } else {
+        fragment.appendChild(document.createTextNode(token));
+      }
+    });
+
+    textNode.parentNode.replaceChild(fragment, textNode);
+  });
+
+  return wordCount;
+}
+
+function isQuickReadExcludedTextParent(parent) {
+  if (parent.closest('[data-taskimatic-quick-read="word"]')) return true;
+  if (QUICK_READ_EXCLUDED_TAGS.has(parent.tagName)) return true;
+
+  return Boolean(parent.closest([
+    "a",
+    "button",
+    "code",
+    "pre",
+    "select",
+    "textarea",
+    "#custom-overlay",
+    "#domainOverlay",
+    "#highlight-overlay",
+    "#modal-overlay"
+  ].join(",")));
+}
+
+function createQuickReadWord(word, { commonWords, interrogativeWords, actionWords }) {
+  const normalizedWord = word.toLowerCase();
+  const span = document.createElement("span");
+  span.setAttribute("data-taskimatic-quick-read", "word");
+  span.textContent = word;
+  span.className = "taskimatic-quick-read-word";
+
+  if (commonWords.has(normalizedWord)) {
+    span.classList.add("taskimatic-quick-read-common");
+  }
+  if (interrogativeWords.has(normalizedWord)) {
+    span.classList.add("taskimatic-quick-read-interrogative");
+  }
+  if (actionWords.has(normalizedWord)) {
+    span.classList.add("taskimatic-quick-read-action");
+  }
+
+  return span;
 }
 
 
