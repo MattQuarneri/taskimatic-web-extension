@@ -604,6 +604,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: "Quick Read failed on this page." });
     }
   }
+  if (message.action === "simplifyPage") {
+    try {
+      const result = simplifyPageStructure();
+      sendResponse({ ok: true, ...result });
+    } catch (error) {
+      console.error("Simplify failed:", error);
+      sendResponse({ ok: false, error: "Simplify failed on this page." });
+    }
+  }
 });
 
 // Traverses upward from the given element until the parent's child count drops.
@@ -827,6 +836,143 @@ function showPopupMessage(message) {
       document.body.removeChild(popup);
     }, 1000);
   }, 2000);
+}
+
+// ============================================================================
+// SIMPLIFY
+// Removes inline styles from div/section wrappers and flattens simple structure.
+// ============================================================================
+
+function simplifyPageStructure() {
+  const stats = {
+    scanned: 0,
+    stylesRemoved: 0,
+    labeledKept: 0,
+    removed: 0,
+    flattened: 0
+  };
+  const labeledElements = new Set();
+
+  Array.from(document.body.querySelectorAll("div, section")).forEach(element => {
+    if (isTaskimaticOwnedElement(element)) return;
+    stats.scanned++;
+
+    if (element.hasAttribute("style")) {
+      element.removeAttribute("style");
+      stats.stylesRemoved++;
+    }
+
+    if (element.hasAttribute("aria-labelledby")) {
+      const preservedElement = preserveLabeledContainer(element);
+      labeledElements.add(preservedElement);
+      stats.labeledKept++;
+    }
+  });
+
+  let changed = true;
+  let passes = 0;
+  while (changed && passes < 40) {
+    changed = false;
+    passes++;
+
+    const elements = Array.from(document.body.querySelectorAll("div, section")).reverse();
+    elements.forEach(element => {
+      if (!element.parentNode || isTaskimaticOwnedElement(element) || labeledElements.has(element)) {
+        return;
+      }
+
+      if (isEmptySimplifyNode(element)) {
+        element.remove();
+        stats.removed++;
+        changed = true;
+        return;
+      }
+
+      const onlyChild = getOnlyMeaningfulChildElement(element);
+      if (onlyChild) {
+        element.parentNode.replaceChild(onlyChild, element);
+        stats.flattened++;
+        changed = true;
+      }
+    });
+  }
+
+  showPopupMessage(`Simplified page: ${stats.flattened} flattened, ${stats.removed} removed`);
+  return stats;
+}
+
+function preserveLabeledContainer(element) {
+  const labelText = getAriaLabelledByText(element);
+  const container = element.tagName === "DIV" ? element : convertElementToDiv(element);
+
+  if (labelText && !hasExistingSimplifyHeading(container, labelText)) {
+    const heading = document.createElement("h3");
+    heading.textContent = labelText;
+    heading.setAttribute("data-taskimatic-simplify-heading", "true");
+    container.insertBefore(heading, container.firstChild);
+  }
+
+  return container;
+}
+
+function convertElementToDiv(element) {
+  const replacement = document.createElement("div");
+
+  Array.from(element.attributes).forEach(attribute => {
+    if (attribute.name !== "style") {
+      replacement.setAttribute(attribute.name, attribute.value);
+    }
+  });
+
+  while (element.firstChild) {
+    replacement.appendChild(element.firstChild);
+  }
+
+  element.parentNode.replaceChild(replacement, element);
+  return replacement;
+}
+
+function getAriaLabelledByText(element) {
+  return (element.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .map(id => id && document.getElementById(id))
+    .filter(Boolean)
+    .map(label => (label.innerText || label.textContent || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function hasExistingSimplifyHeading(container, labelText) {
+  const firstElement = container.firstElementChild;
+  return Boolean(firstElement) &&
+    /^H[1-6]$/.test(firstElement.tagName) &&
+    (firstElement.innerText || firstElement.textContent || "").trim() === labelText;
+}
+
+function isEmptySimplifyNode(element) {
+  if (element.children.length > 0) return false;
+  return !(element.textContent || "").trim();
+}
+
+function getOnlyMeaningfulChildElement(element) {
+  if (element.children.length !== 1) return null;
+
+  const hasMeaningfulText = Array.from(element.childNodes).some(node => {
+    return node.nodeType === Node.TEXT_NODE && node.nodeValue.trim();
+  });
+
+  return hasMeaningfulText ? null : element.children[0];
+}
+
+function isTaskimaticOwnedElement(element) {
+  return Boolean(element.closest([
+    "#custom-overlay",
+    "#domainOverlay",
+    "#highlight-overlay",
+    "#modal-overlay",
+    "[data-taskimatic-quick-read='word']",
+    "[data-taskimatic-simplify-heading='true']"
+  ].join(",")));
 }
 
 // ============================================================================

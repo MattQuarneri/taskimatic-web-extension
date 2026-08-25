@@ -71,11 +71,12 @@ document.addEventListener('DOMContentLoaded', function() {
   // --- Content Functions ---
 
   function initializeQuickReadControls() {
+    const simplifyButton = document.getElementById('simplifyPageBtn');
     const quickReadButton = document.getElementById('quickReadBtn');
     const resetWordsButton = document.getElementById('resetQuickReadWordsBtn');
     const actionWordsInput = document.getElementById('quickReadActionWords');
 
-    if (!quickReadButton || !resetWordsButton || !actionWordsInput) {
+    if (!simplifyButton || !quickReadButton || !resetWordsButton || !actionWordsInput) {
       return;
     }
 
@@ -84,6 +85,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }, function(items) {
       actionWordsInput.value = normalizeQuickReadWords(items.quickReadActionWords)
         .join(', ');
+    });
+
+    simplifyButton.addEventListener('click', function() {
+      simplifyPage();
     });
 
     quickReadButton.addEventListener('click', function() {
@@ -97,6 +102,34 @@ document.addEventListener('DOMContentLoaded', function() {
       actionWordsInput.value = QUICK_READ_DEFAULT_ACTION_WORDS.join(', ');
       chrome.storage.sync.set({ quickReadActionWords: QUICK_READ_DEFAULT_ACTION_WORDS }, function() {
         updateQuickReadStatus('Action words reset.');
+      });
+    });
+  }
+
+  function simplifyPage() {
+    updateQuickReadStatus('Simplifying page...');
+
+    chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+      const activeTab = tabs[0];
+      if (!activeTab || typeof activeTab.id !== 'number' || !canMessageTab(activeTab.url)) {
+        updateQuickReadStatus('Simplify cannot run on this tab.');
+        return;
+      }
+
+      chrome.tabs.sendMessage(activeTab.id, {
+        action: 'simplifyPage'
+      }, function(response) {
+        if (chrome.runtime.lastError) {
+          updateQuickReadStatus('Refresh the page, then try Simplify again.');
+          return;
+        }
+
+        if (!response || !response.ok) {
+          updateQuickReadStatus(response && response.error ? response.error : 'Simplify failed on this page.');
+          return;
+        }
+
+        updateQuickReadStatus(`Simplified ${response.scanned} nodes, flattened ${response.flattened}, removed ${response.removed}.`);
       });
     });
   }
