@@ -4,6 +4,8 @@ let baseElement = null;
 let branchRoot = null;
 let lastRightClickedElement = null;
 let selectedElement = null;
+let pathSelectedElement = null;
+let breadcrumbOverlay = null;
 
 const QUICK_READ_COMMON_WORDS = ["is", "a", "the", "and"];
 const QUICK_READ_INTERROGATIVE_WORDS = ["who", "what", "when", "where", "how", "why", "which", "whom", "whose"];
@@ -549,7 +551,7 @@ function parseTableText(text) {
 // Store the element on which the user right-clicked.
 document.addEventListener("contextmenu", (e) => {
   lastRightClickedElement = e.target;
-});
+}, true);
 
 function safeHighlight(el) {
   try {
@@ -570,7 +572,31 @@ function safeHighlight(el) {
 
 // Listen for the message from the background script to activate the mode.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const isTopFrame = window === window.top;
+  if (!isTopFrame && message.action !== "activateGetPath") {
+    return;
+  }
+
+  if (message.action === "activateGetPath") {
+    if (!lastRightClickedElement) {
+      sendResponse({
+        ok: false,
+        error: "No element was captured. Refresh the page and try Get Path again."
+      });
+      return;
+    }
+
+    try {
+      renderBreadcrumbPath(lastRightClickedElement);
+      sendResponse({ ok: true });
+    } catch (error) {
+      console.error("Get Path failed:", error);
+      sendResponse({ ok: false, error: "Get Path could not render on this page." });
+    }
+    return;
+  }
   if (message.action === "activateGetData" && lastRightClickedElement) {
+      closeBreadcrumbPath();
       baseElement = findLargestBranch(lastRightClickedElement);
       branchRoot = baseElement;
       selectedElement = baseElement;
@@ -659,17 +685,46 @@ function highlightElement(el) {
 
   const rect = el.getBoundingClientRect();
   const overlay = document.createElement("div");
+  const isPathHighlight = pathSelectedElement === el;
+  const canUseTopLayer = isPathHighlight && typeof overlay.showPopover === "function";
   overlay.id = "highlight-overlay";
-  overlay.style.position = "absolute";
-  overlay.style.top = rect.top + window.scrollY + "px";
-  overlay.style.left = rect.left + window.scrollX + "px";
-  overlay.style.width = rect.width + "px";
-  overlay.style.height = rect.height + "px";
-  overlay.style.border = "2px solid red";
-  overlay.style.pointerEvents = "none";  // Make sure it doesn't block clicks.
-  overlay.style.zIndex = "9999";
-  
-  document.body.appendChild(overlay);
+  overlay.setAttribute("aria-hidden", "true");
+  if (canUseTopLayer) {
+    overlay.setAttribute("popover", "manual");
+  }
+  setImportantStyles(overlay, {
+    display: "block",
+    position: isPathHighlight ? "fixed" : "absolute",
+    top: rect.top + (isPathHighlight ? 0 : window.scrollY) + "px",
+    left: rect.left + (isPathHighlight ? 0 : window.scrollX) + "px",
+    right: "auto",
+    bottom: "auto",
+    width: rect.width + "px",
+    height: rect.height + "px",
+    margin: "0",
+    padding: "0",
+    border: "2px solid red",
+    boxSizing: "border-box",
+    background: "transparent",
+    overflow: "visible",
+    visibility: "visible",
+    opacity: "1",
+    transform: "none",
+    clip: "auto",
+    clipPath: "none",
+    pointerEvents: "none",
+    zIndex: "2147483646"
+  });
+
+  (isPathHighlight ? document.documentElement : document.body).appendChild(overlay);
+  if (canUseTopLayer) {
+    try {
+      overlay.showPopover();
+    } catch (error) {
+      // The maximum z-index remains as a fallback if the top layer is unavailable.
+      overlay.removeAttribute("popover");
+    }
+  }
 }
 
 function removeHighlightOverlay() {
@@ -677,6 +732,285 @@ function removeHighlightOverlay() {
   if (existing) {
     existing.parentNode.removeChild(existing);
   }
+}
+
+function setImportantStyles(element, styles) {
+  Object.entries(styles).forEach(([property, value]) => {
+    const cssProperty = property.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+    element.style.setProperty(cssProperty, value, "important");
+  });
+}
+
+// Renders the DOM ancestry for an element and lets each breadcrumb become the
+// highlighted selection without affecting the page's normal click behavior.
+function renderBreadcrumbPath(element) {
+  closeBreadcrumbPath();
+
+  const path = getPath(element);
+  if (path.length === 0) return;
+
+  pathSelectedElement = path[path.length - 1];
+  safeHighlight(pathSelectedElement);
+
+  const host = document.createElement("div");
+  host.id = "taskimatic-breadcrumbs";
+  host.setAttribute("data-taskimatic-owned", "true");
+  const canUseTopLayer = typeof host.showPopover === "function";
+  if (canUseTopLayer) {
+    host.setAttribute("popover", "manual");
+  }
+  setImportantStyles(host, {
+    display: "block",
+    position: "fixed",
+    top: "auto",
+    right: "16px",
+    bottom: "16px",
+    left: "16px",
+    width: "auto",
+    height: "auto",
+    maxWidth: "none",
+    maxHeight: "none",
+    margin: "0",
+    padding: "0",
+    border: "0",
+    background: "transparent",
+    overflow: "visible",
+    visibility: "visible",
+    opacity: "1",
+    transform: "none",
+    clip: "auto",
+    clipPath: "none",
+    pointerEvents: "auto",
+    zIndex: "2147483647"
+  });
+  const shadow = host.attachShadow({ mode: "open" });
+
+  const style = document.createElement("style");
+  style.textContent = `
+    :host {
+      all: initial;
+      position: fixed;
+      top: auto;
+      right: 16px;
+      bottom: 16px;
+      left: 16px;
+      width: auto;
+      height: auto;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      overflow: visible;
+      background: transparent;
+      z-index: 2147483647;
+      color-scheme: light;
+    }
+    .panel {
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #c7cdd4;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, .24);
+      color: #202124;
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .label {
+      flex: 0 0 auto;
+      font-weight: 600;
+    }
+    nav {
+      display: flex;
+      flex: 1 1 auto;
+      align-items: center;
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .crumb {
+      flex: 0 0 auto;
+      margin: 0;
+      padding: 4px 6px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      color: #185abc;
+      font: inherit;
+      cursor: pointer;
+    }
+    .crumb:hover,
+    .crumb:focus-visible {
+      border-color: #9aa0a6;
+      outline: none;
+      background: #f1f3f4;
+    }
+    .crumb[aria-current="location"] {
+      border-color: #d93025;
+      background: #fce8e6;
+      color: #a50e0e;
+      font-weight: 600;
+    }
+    .separator {
+      flex: 0 0 auto;
+      padding: 0 2px;
+      color: #80868b;
+      user-select: none;
+    }
+    .close {
+      flex: 0 0 auto;
+      width: 28px;
+      height: 28px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: #5f6368;
+      font: 20px/28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .close:hover,
+    .close:focus-visible {
+      outline: none;
+      background: #f1f3f4;
+      color: #202124;
+    }
+  `;
+
+  const panel = document.createElement("div");
+  panel.className = "panel";
+
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = "DOM path";
+
+  const nav = document.createElement("nav");
+  nav.setAttribute("aria-label", "DOM path");
+
+  const buttons = [];
+  path.forEach((pathElement, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.className = "separator";
+      separator.setAttribute("aria-hidden", "true");
+      separator.textContent = "\u203a";
+      nav.appendChild(separator);
+    }
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "crumb";
+    button.textContent = getElementBreadcrumbLabel(pathElement);
+    button.title = button.textContent;
+    if (pathElement === pathSelectedElement) {
+      button.setAttribute("aria-current", "location");
+    }
+    button.addEventListener("click", () => {
+      if (!pathElement.isConnected) {
+        closeBreadcrumbPath();
+        return;
+      }
+
+      pathSelectedElement = pathElement;
+      buttons.forEach(item => item.removeAttribute("aria-current"));
+      button.setAttribute("aria-current", "location");
+      safeHighlight(pathSelectedElement);
+    });
+    buttons.push(button);
+    nav.appendChild(button);
+  });
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "close";
+  closeButton.setAttribute("aria-label", "Close DOM path");
+  closeButton.title = "Close";
+  closeButton.textContent = "\u00d7";
+  closeButton.addEventListener("click", closeBreadcrumbPath);
+
+  panel.append(label, nav, closeButton);
+  shadow.append(style, panel);
+  document.documentElement.appendChild(host);
+  breadcrumbOverlay = host;
+  if (canUseTopLayer) {
+    try {
+      host.showPopover();
+    } catch (error) {
+      // Fixed positioning plus maximum z-index is the compatibility fallback.
+      host.removeAttribute("popover");
+    }
+  }
+
+  // Start with the selected (last) breadcrumb in view when the path is long.
+  buttons[buttons.length - 1].scrollIntoView({ block: "nearest", inline: "end" });
+  window.addEventListener("scroll", refreshPathHighlight, true);
+  window.addEventListener("resize", refreshPathHighlight);
+  document.addEventListener("keydown", onBreadcrumbKeyDown, true);
+}
+
+function getPath(element) {
+  const path = [];
+  let current = element instanceof Element
+    ? element
+    : element && element.parentElement;
+
+  while (current) {
+    path.unshift(current);
+    if (current === document.body) break;
+    current = current.parentElement;
+  }
+
+  // Normal page content is rooted at body. Retain the actual path for edge
+  // cases such as a context menu opened directly on the html element.
+  return path;
+}
+
+function getElementBreadcrumbLabel(element) {
+  let label = element.tagName.toLowerCase();
+
+  if (element.id) {
+    label += `#${element.id}`;
+  } else if (element.classList.length > 0) {
+    label += Array.from(element.classList)
+      .slice(0, 2)
+      .map(className => `.${className}`)
+      .join("");
+  } else if (element.parentElement) {
+    const matchingSiblings = Array.from(element.parentElement.children)
+      .filter(sibling => sibling.tagName === element.tagName);
+    if (matchingSiblings.length > 1) {
+      label += `:nth-of-type(${matchingSiblings.indexOf(element) + 1})`;
+    }
+  }
+
+  return label;
+}
+
+function refreshPathHighlight() {
+  if (!breadcrumbOverlay || !pathSelectedElement || !pathSelectedElement.isConnected) return;
+  highlightElement(pathSelectedElement);
+}
+
+function onBreadcrumbKeyDown(event) {
+  if (event.key === "Escape") {
+    closeBreadcrumbPath();
+  }
+}
+
+function closeBreadcrumbPath() {
+  window.removeEventListener("scroll", refreshPathHighlight, true);
+  window.removeEventListener("resize", refreshPathHighlight);
+  document.removeEventListener("keydown", onBreadcrumbKeyDown, true);
+
+  if (breadcrumbOverlay) {
+    breadcrumbOverlay.remove();
+  }
+  breadcrumbOverlay = null;
+  pathSelectedElement = null;
+  removeHighlightOverlay();
 }
 
 // Attaches event listeners to allow mousewheel navigation, cancellation, and click-to-copy.
@@ -1292,6 +1626,7 @@ function createQuickReadWord(word, { commonWords, interrogativeWords, actionWord
 
 // Create the overlay window when the page loads.
 (function createOverlayWindow() {
+    if (window !== window.top) return;
     if (document.getElementById("domainOverlay")) return;
   
     const overlay = document.createElement("div");

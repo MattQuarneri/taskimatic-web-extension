@@ -7,6 +7,7 @@ const QUICK_READ_DEFAULT_ACTION_WORDS = ["secure", "power", "plan", "update", "e
 // When the DOM is loaded, load tabs and bookmarks.
 document.addEventListener('DOMContentLoaded', function() {
     initializeQuickReadControls();
+    initializeTargetProcessingSwitch();
 
     // Retrieve and display open tab URLs.
     let tabCount = 0;
@@ -67,6 +68,38 @@ document.addEventListener('DOMContentLoaded', function() {
       });
     });
   });
+
+  function initializeTargetProcessingSwitch() {
+    const toggle = document.getElementById('processTargetDataSwitch');
+    const status = document.getElementById('targetProcessingStatus');
+    const open = document.getElementById('openTargetDataBtn');
+    if (!toggle || !status || !open) return;
+
+    chrome.storage.local.get({ processTargetData: false }).then(({ processTargetData }) => {
+      toggle.checked = Boolean(processTargetData);
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes.processTargetData) {
+        toggle.checked = Boolean(changes.processTargetData.newValue);
+      }
+    });
+
+    toggle.addEventListener('change', async () => {
+      await chrome.storage.local.set({ processTargetData: toggle.checked });
+      status.textContent = toggle.checked
+        ? 'Get data buttons are enabled on Target order pages.'
+        : 'Get data buttons are off.';
+    });
+
+    open.addEventListener('click', async () => {
+      try {
+        const response = await chrome.runtime.sendMessage({ action: 'openTargetDataWindow' });
+        if (!response?.ok) throw new Error(response?.error || 'Could not open Target JSON.');
+      } catch {
+        status.textContent = 'Could not open the Target JSON window.';
+      }
+    });
+  }
 
   // --- Content Functions ---
 

@@ -43,6 +43,15 @@
         min-height: 18px;
         margin-top: 8px;
       }
+      .target-switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+      .target-switch input { appearance: none; width: 36px; height: 20px; margin: 0;
+        border-radius: 999px; background: #aeb4bd; position: relative; cursor: pointer; }
+      .target-switch input::before { content: ""; position: absolute; top: 2px; left: 2px;
+        width: 16px; height: 16px; border-radius: 50%; background: white;
+        transition: transform .15s ease; }
+      .target-switch input:checked { background: #c00; }
+      .target-switch input:checked::before { transform: translateX(16px); }
+      .target-switch input:focus-visible { outline: 2px solid #202124; outline-offset: 2px; }
       #logo{
         position: absolute;
         top: 0px;
@@ -80,6 +89,14 @@
           <button id="resetQuickReadWordsBtn">Reset Words</button>
         </div>
         <div id="quickReadStatus" aria-live="polite"></div>
+        <h2>Target orders</h2>
+        <label class="target-switch" for="processTargetDataSwitch">
+          <input id="processTargetDataSwitch" type="checkbox" role="switch">
+          Process Target data
+        </label>
+        <p class="hint">Adds a Get data button to Target's orders list and store purchase pages. Click it to add that page's data to a JSON window.</p>
+        <button id="openTargetDataBtn" type="button">Open Target JSON</button>
+        <div id="targetProcessingStatus" class="hint" aria-live="polite"></div>
       </div>
       <div slot="tab-content" tab-content="agent" tab-label="Agent">
         <p>Arriving Soon</p>
