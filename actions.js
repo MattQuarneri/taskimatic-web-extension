@@ -36,35 +36,28 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     });
     
-    // Load history timeline on button click.
-    document.getElementById('loadHistoryBtn').addEventListener('click', function() {
-      loadHistory();
+    // Analyze all browsing history on button click.
+    document.getElementById('analyzeHistoryBtn').addEventListener('click', function() {
+      analyzeHistory();
+    });
+    document.getElementById('exportHistreeBtn').addEventListener('click', function() {
+      if (lastHistree) downloadJson(lastHistree, 'histree');
+    });
+    document.getElementById('exportHistreeLinksBtn').addEventListener('click', function() {
+      if (lastHistree) downloadJson(flattenHistreeLinks(lastHistree), 'history-links');
+    });
+    document.getElementById('historySortSelect').addEventListener('change', function() {
+      histreeSortMode = this.value;
+      if (lastHistree) renderHistree(lastHistree);
+    });
+    document.getElementById('historySearchInput').addEventListener('input', function() {
+      histreeFilter = this.value.trim().toLowerCase();
+      scheduleHistreeRender();
     });
     // Save open tab URLs and titles to JSON file on button click.
     document.getElementById('save2JSON').addEventListener('click', function() {
       chrome.tabs.query({}, function(tabs) {
-        const tabData = tabs.map(tab => ({ url: tab.url, title: tab.title }));
-        const json = JSON.stringify(tabData, null, 2);
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-
-        const d = new Date();
-        const ts = d.getFullYear() +
-          String(d.getMonth()+1).padStart(2,'0') +
-          String(d.getDate()).padStart(2,'0') +
-          String(d.getHours()).padStart(2,'0') +
-          String(d.getMinutes()).padStart(2,'0') +
-          String(d.getSeconds()).padStart(2,'0');
-
-        a.download = `open-tabs-${ts}.json`;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 100);
+        downloadJson(tabs.map(tab => ({ url: tab.url, title: tab.title })), 'open-tabs');
       });
     });
   });
@@ -343,55 +336,354 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // --- History Functions ---
   
-  // Load and process browsing history.
-  function loadHistory() {
-    // Define a time window (e.g., the past 30 days).
-    const oneMonthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    chrome.history.search({text: '', startTime: oneMonthAgo, maxResults: 1000}, function(historyItems) {
-      // Sort history items in ascending order by lastVisitTime.
-      historyItems.sort((a, b) => a.lastVisitTime - b.lastVisitTime);
-      // Deduplicate history entries (using a 10-minute threshold).
-      const dedupedHistory = dedupeHistory(historyItems, 10 * 60 * 1000);
-      displayHistory(dedupedHistory);
-    });
+  // 0 = search from the very beginning of the local history database.
+  const HISTORY_SEARCH_START = 0;
+  // maxResults has no documented cap; set it high enough to get everything.
+  const HISTORY_MAX_RESULTS = 1000000;
+  // A visit "ends" when the next visit (to any URL) begins. Cap the gap so idle
+  // time (laptop asleep, browser closed) isn't counted as reading time.
+  const MAX_VISIT_GAP_MS = 30 * 60 * 1000;
+  const VISIT_LOOKUP_CONCURRENCY = 6;
+
+  let lastHistree = null;
+
+  // Analyze the full browsing history into a "histree":
+  // host -> path segment -> page, with visit counts and time spent per node.
+  async function analyzeHistory() {
+    const analyzeBtn = document.getElementById('analyzeHistoryBtn');
+    analyzeBtn.disabled = true;
+    try {
+      updateHistoryStatus('Searching all history...');
+      const items = await chrome.history.search({
+        text: '',
+        startTime: HISTORY_SEARCH_START,
+        maxResults: HISTORY_MAX_RESULTS
+      });
+      updateHistoryStatus(`Found ${items.length} pages. Reading visit timestamps...`);
+
+      const visitsByUrl = await collectVisits(items);
+      const timeByUrl = computeVisitDurations(visitsByUrl);
+      lastHistree = buildHistree(items, timeByUrl);
+      renderHistree(lastHistree);
+
+      document.getElementById('exportHistreeBtn').disabled = false;
+      document.getElementById('exportHistreeLinksBtn').disabled = false;
+      updateHistoryStatus(
+        `Analyzed ${lastHistree.uniqueUrls} pages, ${lastHistree.totalVisits} visits, ` +
+        `${formatDuration(lastHistree.totalTimeMs)} total. Expand a site below.`
+      );
+    } catch (e) {
+      updateHistoryStatus('History analysis failed: ' + e.message);
+    } finally {
+      analyzeBtn.disabled = false;
+    }
   }
-  
-  // Remove consecutive history items for the same site if they occur within a threshold.
-  function dedupeHistory(items, thresholdMs) {
-    if (items.length === 0) return [];
-    let deduped = [items[0]];
-    for (let i = 1; i < items.length; i++) {
-      const current = items[i];
-      const last = deduped[deduped.length - 1];
-      try {
-        const currentHost = new URL(current.url).host;
-        const lastHost = new URL(last.url).host;
-        if (currentHost === lastHost && (current.lastVisitTime - last.lastVisitTime < thresholdMs)) {
-          // Skip current item as it's considered a duplicate within the threshold.
-          continue;
-        } else {
-          deduped.push(current);
+
+  // chrome.history.search only returns the LAST visit time per URL, so getVisits
+  // is the only way to get every visit timestamp (needed for durations).
+  // Runs with limited concurrency and progress updates.
+  async function collectVisits(items) {
+    const visitsByUrl = new Map();
+    let next = 0;
+    let done = 0;
+    async function worker() {
+      while (next < items.length) {
+        const item = items[next++];
+        try {
+          visitsByUrl.set(item.url, await chrome.history.getVisits({ url: item.url }));
+        } catch (e) {
+          visitsByUrl.set(item.url, []);
         }
-      } catch(e) {
-        // If URL parsing fails, add the entry.
-        deduped.push(current);
+        done++;
+        if (done % 200 === 0) {
+          updateHistoryStatus(`Reading visit timestamps ${done}/${items.length}...`);
+        }
       }
     }
-    return deduped;
+    const workers = [];
+    for (let i = 0; i < VISIT_LOOKUP_CONCURRENCY; i++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+    return visitsByUrl;
+  }
+
+  // Rough per-URL time: merge every visit into one global timeline; each visit
+  // is "open" until the next visit starts (capped at MAX_VISIT_GAP_MS).
+  function computeVisitDurations(visitsByUrl) {
+    const timeline = [];
+    visitsByUrl.forEach((visits, url) => {
+      visits.forEach(visit => timeline.push({ time: visit.visitTime, url }));
+    });
+    timeline.sort((a, b) => a.time - b.time);
+
+    const timeByUrl = new Map();
+    for (let i = 0; i < timeline.length; i++) {
+      const gap = i + 1 < timeline.length ? timeline[i + 1].time - timeline[i].time : 0;
+      const duration = Math.min(Math.max(gap, 0), MAX_VISIT_GAP_MS);
+      timeByUrl.set(timeline[i].url, (timeByUrl.get(timeline[i].url) || 0) + duration);
+    }
+    return timeByUrl;
+  }
+
+  function newHistreeNode(name) {
+    return { name: name, visits: 0, timeMs: 0, lastVisit: 0, pages: {}, children: {} };
+  }
+
+  // Build the histree. Pages are keyed by URL with query string/hash stripped,
+  // so tracking-parameter variants of the same page merge into one entry.
+  function buildHistree(items, timeByUrl) {
+    const root = {
+      generatedAt: new Date().toISOString(),
+      visitGapCapMs: MAX_VISIT_GAP_MS,
+      uniqueUrls: 0,
+      totalVisits: 0,
+      totalTimeMs: 0,
+      hosts: {}
+    };
+
+    items.forEach(item => {
+      let parsed;
+      try {
+        parsed = new URL(item.url);
+      } catch (e) {
+        return;
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+
+      const visits = item.visitCount || 0;
+      const timeMs = timeByUrl.get(item.url) || 0;
+      const lastVisit = item.lastVisitTime || 0;
+      root.uniqueUrls++;
+      root.totalVisits += visits;
+      root.totalTimeMs += timeMs;
+
+      let node = root.hosts[parsed.hostname];
+      if (!node) {
+        node = newHistreeNode(parsed.hostname);
+        root.hosts[parsed.hostname] = node;
+      }
+      node.visits += visits;
+      node.timeMs += timeMs;
+      node.lastVisit = Math.max(node.lastVisit, lastVisit);
+
+      parsed.pathname.split('/').filter(Boolean).forEach(segment => {
+        let name = segment;
+        try { name = decodeURIComponent(segment); } catch (e) { /* keep raw segment */ }
+        if (!node.children[name]) node.children[name] = newHistreeNode(name);
+        node = node.children[name];
+        node.visits += visits;
+        node.timeMs += timeMs;
+        node.lastVisit = Math.max(node.lastVisit, lastVisit);
+      });
+
+      const pageUrl = parsed.origin + parsed.pathname;
+      const page = node.pages[pageUrl];
+      if (page) {
+        page.visits += visits;
+        page.timeMs += timeMs;
+        page.variants++;
+        page.lastVisit = Math.max(page.lastVisit, lastVisit);
+        if (!page.title && item.title) page.title = item.title;
+      } else {
+        node.pages[pageUrl] = {
+          url: pageUrl,
+          title: item.title || pageUrl,
+          visits: visits,
+          timeMs: timeMs,
+          avgMs: 0,
+          lastVisit: lastVisit,
+          variants: 1
+        };
+      }
+    });
+
+    // Averages can only be computed after all URL variants are merged.
+    Object.values(root.hosts).forEach(function computeAverages(node) {
+      Object.values(node.pages).forEach(page => {
+        page.avgMs = page.visits > 0 ? Math.round(page.timeMs / page.visits) : 0;
+      });
+      Object.values(node.children).forEach(computeAverages);
+    });
+
+    return root;
   }
   
-  // Display the history items in a list.
-  function displayHistory(items) {
+  // Histree view state: 'time' | 'popularity' | 'recency', plus the search text.
+  let histreeSortMode = 'time';
+  let histreeFilter = '';
+  let histreeRenderTimer = null;
+
+  // Comparator works for both tree nodes and page entries.
+  function histreeNodeComparator(a, b) {
+    if (histreeSortMode === 'recency') return b.lastVisit - a.lastVisit;
+    if (histreeSortMode === 'popularity') return b.visits - a.visits || b.timeMs - a.timeMs;
+    return b.timeMs - a.timeMs || b.visits - a.visits;
+  }
+
+  function nodeSummaryText(node) {
+    let text = `${node.name} — ${node.visits} visits · ${formatDuration(node.timeMs)}`;
+    if (histreeSortMode === 'recency' && node.lastVisit) {
+      text += ` · last ${new Date(node.lastVisit).toLocaleString()}`;
+    }
+    return text;
+  }
+
+  // Return a pruned copy of the node keeping only matches (host/segment name,
+  // page title or URL). A node that matches itself keeps its whole subtree.
+  function filterHistreeNode(node, query) {
+    const selfMatch = node.name.toLowerCase().includes(query);
+    const pages = {};
+    const children = {};
+    if (selfMatch) {
+      Object.assign(pages, node.pages);
+      Object.assign(children, node.children);
+    } else {
+      Object.values(node.pages).forEach(page => {
+        if (page.title.toLowerCase().includes(query) || page.url.toLowerCase().includes(query)) {
+          pages[page.url] = page;
+        }
+      });
+      Object.values(node.children).forEach(child => {
+        const pruned = filterHistreeNode(child, query);
+        if (pruned) children[pruned.name] = pruned;
+      });
+    }
+    if (!selfMatch && Object.keys(pages).length === 0 && Object.keys(children).length === 0) {
+      return null;
+    }
+    return {
+      name: node.name,
+      visits: node.visits,
+      timeMs: node.timeMs,
+      lastVisit: node.lastVisit,
+      pages: pages,
+      children: children
+    };
+  }
+
+  // Debounced re-render for search-as-you-type.
+  function scheduleHistreeRender() {
+    clearTimeout(histreeRenderTimer);
+    histreeRenderTimer = setTimeout(() => {
+      if (lastHistree) renderHistree(lastHistree);
+    }, 150);
+  }
+
+  // Render the histree as a collapsible tree. Children render lazily on first
+  // expand so huge histories don't freeze the popup. While filtering, matched
+  // nodes auto-expand so the matches are visible.
+  function renderHistree(histree) {
     const container = document.getElementById('historyContainer');
-    container.innerHTML = "";
-    let ul = document.createElement('ul');
-    items.forEach(item => {
-      let li = document.createElement('li');
-      let date = new Date(item.lastVisitTime).toLocaleString();
-      li.textContent = `${date}: ${item.url}`;
-      ul.appendChild(li);
+    container.innerHTML = '';
+    let hosts = Object.values(histree.hosts);
+    const filtering = histreeFilter.length > 0;
+    if (filtering) {
+      hosts = hosts.map(host => filterHistreeNode(host, histreeFilter)).filter(Boolean);
+      if (hosts.length === 0) {
+        container.textContent = 'No matches.';
+        return;
+      }
+    }
+    hosts
+      .sort(histreeNodeComparator)
+      .forEach(host => container.appendChild(createTreeDetails(host, filtering)));
+  }
+
+  function createTreeDetails(node, expand) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = nodeSummaryText(node);
+    details.appendChild(summary);
+    details.addEventListener('toggle', function onToggle() {
+      if (!details.open) return;
+      details.removeEventListener('toggle', onToggle);
+      renderNodeChildren(details, node, expand);
     });
-    container.appendChild(ul);
+    if (expand) details.open = true;
+    return details;
+  }
+
+  function renderNodeChildren(details, node, expand) {
+    const list = document.createElement('ul');
+
+    Object.values(node.pages)
+      .sort(histreeNodeComparator)
+      .forEach(page => {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = page.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = page.title;
+        li.appendChild(a);
+        const variants = page.variants > 1 ? ` · ${page.variants} url variants` : '';
+        const recency = histreeSortMode === 'recency' && page.lastVisit
+          ? ` · last ${new Date(page.lastVisit).toLocaleString()}`
+          : '';
+        li.appendChild(document.createTextNode(
+          ` — ${page.visits} visits · ${formatDuration(page.timeMs)} total · ${formatDuration(page.avgMs)} avg${variants}${recency}`
+        ));
+        list.appendChild(li);
+      });
+
+    Object.values(node.children)
+      .sort(histreeNodeComparator)
+      .forEach(child => {
+        const li = document.createElement('li');
+        li.appendChild(createTreeDetails(child, expand));
+        list.appendChild(li);
+      });
+
+    details.appendChild(list);
+  }
+  
+  function formatDuration(ms) {
+    const totalSeconds = Math.round(ms / 1000);
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  // Flatten the histree into a sorted list of page links for export.
+  function flattenHistreeLinks(histree) {
+    const links = [];
+    Object.values(histree.hosts).forEach(function walk(node) {
+      Object.values(node.pages).forEach(page => links.push(page));
+      Object.values(node.children).forEach(walk);
+    });
+    return links.sort((a, b) => b.timeMs - a.timeMs || b.visits - a.visits);
+  }
+
+  function downloadJson(data, filenamePrefix) {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+
+    const d = new Date();
+    const ts = d.getFullYear() +
+      String(d.getMonth()+1).padStart(2,'0') +
+      String(d.getDate()).padStart(2,'0') +
+      String(d.getHours()).padStart(2,'0') +
+      String(d.getMinutes()).padStart(2,'0') +
+      String(d.getSeconds()).padStart(2,'0');
+
+    a.download = `${filenamePrefix}-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  }
+
+  function updateHistoryStatus(message) {
+    const status = document.getElementById('historyStatus');
+    if (status) status.textContent = message;
   }
 
   // --- Cookie Functions ---

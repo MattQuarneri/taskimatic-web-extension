@@ -33,6 +33,12 @@
       .content-actions button {
         margin-bottom: 0;
       }
+      .history-controls { align-items: center; }
+      .history-controls input[type="search"] {
+        flex: 1;
+        min-width: 0;
+        padding: 4px 6px;
+      }
       .hint {
         color: #555;
         font-size: 12px;
@@ -110,7 +116,20 @@
         <div id="bookmarksContainer"></div>
       </div>
       <div slot="tab-content" tab-content="history" tab-label="History">
-        <button id="loadHistoryBtn">Load History (Timeline)</button>
+        <div class="content-actions">
+          <button id="analyzeHistoryBtn">Analyze History</button>
+          <button id="exportHistreeBtn" disabled>Export Histree JSON</button>
+          <button id="exportHistreeLinksBtn" disabled>Export Links JSON</button>
+        </div>
+        <div class="content-actions history-controls">
+          <input type="search" id="historySearchInput" placeholder="Search sites, titles, urls..." autocomplete="off">
+          <select id="historySortSelect">
+            <option value="time" selected>Sort: Time spent</option>
+            <option value="popularity">Sort: Popularity</option>
+            <option value="recency">Sort: Recency</option>
+          </select>
+        </div>
+        <div id="historyStatus" class="hint" aria-live="polite"></div>
         <div id="historyContainer"></div>
       </div>
       <div slot="tab-content" tab-content="cookies" tab-label="Cookies">
